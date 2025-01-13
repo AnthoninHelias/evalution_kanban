@@ -1,0 +1,100 @@
+name: "Limit Tasks in To Do"
+
+on:
+  schedule:
+    - cron: "*/15 * * * *" # S'exécute toutes les 15 minutes
+  workflow_dispatch:
+
+jobs:
+  limit-tasks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '16'
+
+      - name: Install dependencies
+        run: npm install axios
+
+      - name: Limit tasks in To Do
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node <<EOF
+          const axios = require('axios');
+
+          const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+          const owner = 'AnthoninHelias'; // Remplacez par le nom de l'organisation ou utilisateur
+          const repo = 'evalution_kanban';  // Remplacez par le nom du dépôt
+          const projectNumber = 1; // Numéro du projet à surveiller
+          const toDoColumnName = "To Do";
+          const backlogColumnName = "Backlog";
+          const maxTasksPerUser = 2;
+
+          const api = axios.create({
+            baseURL: 'https://api.github.com',
+            headers: {
+              Authorization: `Bearer ${GITHUB_TOKEN}`,
+              Accept: 'application/vnd.github.inertia-preview+json',
+            },
+          });
+
+          async function getProjectId() {
+            const { data: projects } = await api.get(`/repos/${owner}/${repo}/projects`);
+            const project = projects.find(proj => proj.number === projectNumber);
+            if (!project) throw new Error('Project not found');
+            return project.id;
+          }
+
+          async function getColumns(projectId) {
+            const { data: columns } = await api.get(`/projects/${projectId}/columns`);
+            return columns;
+          }
+
+          async function getCards(columnId) {
+            const { data: cards } = await api.get(`/projects/columns/${columnId}/cards`);
+            return cards;
+          }
+
+          async function moveCard(cardId, destinationColumnId) {
+            await api.post(`/projects/columns/cards/${cardId}/moves`, {
+              position: 'top',
+              column_id: destinationColumnId,
+            });
+          }
+
+          async function main() {
+            const projectId = await getProjectId();
+            const columns = await getColumns(projectId);
+
+            const toDoColumn = columns.find(col => col.name === toDoColumnName);
+            const backlogColumn = columns.find(col => col.name === backlogColumnName);
+            if (!toDoColumn || !backlogColumn) throw new Error('Columns not found');
+
+            const toDoCards = await getCards(toDoColumn.id);
+
+            const userTaskCounts = {};
+
+            for (const card of toDoCards) {
+              const assignee = card.assignee?.login; // Assurez-vous que le champ existe
+              if (!assignee) continue;
+
+              userTaskCounts[assignee] = (userTaskCounts[assignee] || 0) + 1;
+
+              if (userTaskCounts[assignee] > maxTasksPerUser) {
+                console.log(`Moving card ${card.id} assigned to ${assignee} to Backlog`);
+                await moveCard(card.id, backlogColumn.id);
+              }
+            }
+          }
+
+          main().catch(error => {
+            console.error('Error:', error);
+            process.exit(1);
+          });
+          EOF
